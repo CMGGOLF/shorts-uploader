@@ -1,221 +1,359 @@
-"""
-YouTube Shorts Uploader - Local Web App
-유튜브 Shorts 업로드 관리 프로그램
-"""
-import os
-import json
-import threading
-from datetime import datetime
-from pathlib import Path
-from flask import Flask, render_template, request, jsonify, send_from_directory
-from werkzeug.utils import secure_filename
-
-# Google API
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
-
-app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB
-
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
-CLIENT_SECRET_FILE = "client_secret.json"
-TOKEN_FILE = "token.json"
-DATA_FILE = "videos.json"
-
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-
-# 업로드 상태 저장
-upload_status = {}
-
-
-def load_videos():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return []
-
-
-def save_videos(videos):
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(videos, f, ensure_ascii=False, indent=2)
-
-
-def get_youtube_service():
-    creds = None
-    if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-    
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not os.path.exists(CLIENT_SECRET_FILE):
-                return None
-            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open(TOKEN_FILE, 'w') as token:
-            token.write(creds.to_json())
-    
-    return build("youtube", "v3", credentials=creds)
-
-
-def do_upload(video_id, filepath, title, description, tags, privacy):
-    """실제 업로드 실행 (백그라운드)"""
-    global upload_status
-    try:
-        upload_status[video_id] = {"status": "uploading", "progress": 0, "message": "업로드 시작"}
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube & Instagram Uploader</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f0f0f;
+            color: #fff;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 900px; margin: 0 auto; }
+        h1 { font-size: 24px; margin-bottom: 20px; }
+        .auth-status {
+            background: #1a1a1a;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+        }
+        .auth-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .auth-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #ff4444;
+        }
+        .auth-dot.connected { background: #44ff44; }
+        .card {
+            background: #1a1a1a;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .card h2 { font-size: 16px; margin-bottom: 15px; color: #aaa; }
+        .upload-area {
+            border: 2px dashed #333;
+            border-radius: 8px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.3s;
+        }
+        .upload-area:hover { border-color: #555; }
+        .upload-area.dragover { border-color: #4CAF50; }
+        input[type="file"] { display: none; }
+        .form-row {
+            display: flex;
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .form-group { flex: 1; }
+        .form-group label {
+            display: block;
+            font-size: 12px;
+            color: #888;
+            margin-bottom: 5px;
+        }
+        input[type="text"], textarea, select {
+            width: 100%;
+            background: #2a2a2a;
+            border: 1px solid #333;
+            border-radius: 6px;
+            padding: 10px;
+            color: #fff;
+            font-size: 14px;
+        }
+        textarea { min-height: 80px; resize: vertical; }
+        .platforms {
+            display: flex;
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .platform-check {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: #2a2a2a;
+            padding: 10px 15px;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .platform-check input { width: 18px; height: 18px; }
+        .btn {
+            background: #4CAF50;
+            color: #fff;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+            margin-top: 15px;
+        }
+        .btn:hover { background: #45a049; }
+        .btn:disabled { background: #333; cursor: not-allowed; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            text-align: left;
+            padding: 12px;
+            border-bottom: 1px solid #333;
+        }
+        th { color: #888; font-weight: normal; font-size: 12px; }
+        .status-badge {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        .status-uploading { background: #ff9800; }
+        .status-completed { background: #4CAF50; }
+        .status-error { background: #f44336; }
+        .progress-bar {
+            width: 100px;
+            height: 6px;
+            background: #333;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            background: #4CAF50;
+            transition: width 0.3s;
+        }
+        .empty-message {
+            text-align: center;
+            color: #666;
+            padding: 30px;
+        }
+        a { color: #4CAF50; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>YouTube & Instagram Uploader</h1>
         
-        youtube = get_youtube_service()
-        if not youtube:
-            upload_status[video_id] = {"status": "error", "message": "인증 실패. client_secret.json을 확인하세요."}
-            return
+        <div class="auth-status">
+            <div class="auth-item">
+                <div class="auth-dot" id="youtube-dot"></div>
+                <span>YouTube</span>
+            </div>
+            <div class="auth-item">
+                <div class="auth-dot" id="instagram-dot"></div>
+                <span>Instagram</span>
+            </div>
+        </div>
         
-        body = {
-            "snippet": {
-                "title": title,
-                "description": description,
-                "tags": tags,
-                "categoryId": "22",
-            },
-            "status": {
-                "privacyStatus": privacy,
-                "selfDeclaredMadeForKids": False,
-            },
+        <div class="card">
+            <h2>새 영상 추가</h2>
+            <div class="upload-area" id="upload-area">
+                <p>클릭하거나 영상을 드래그하세요 (MP4)</p>
+                <input type="file" id="file-input" accept="video/mp4">
+            </div>
+            
+            <div class="form-row">
+                <div class="form-group">
+                    <label>제목</label>
+                    <input type="text" id="title" placeholder="영상 제목 #Shorts">
+                </div>
+                <div class="form-group">
+                    <label>태그 (쉼표로 구분)</label>
+                    <input type="text" id="tags" placeholder="shorts, 키워드1, 키워드2">
+                </div>
+            </div>
+            
+            <div class="form-group" style="margin-top: 15px;">
+                <label>설명</label>
+                <textarea id="description" placeholder="영상 설명"></textarea>
+            </div>
+            
+            <div class="form-row">
+                <div class="form-group">
+                    <label>공개 설정 (YouTube)</label>
+                    <select id="privacy">
+                        <option value="public">공개</option>
+                        <option value="unlisted">일부공개</option>
+                        <option value="private">비공개</option>
+                    </select>
+                </div>
+            </div>
+            
+            <div class="platforms">
+                <label class="platform-check">
+                    <input type="checkbox" id="platform-youtube" checked>
+                    <span>YouTube</span>
+                </label>
+                <label class="platform-check">
+                    <input type="checkbox" id="platform-instagram">
+                    <span>Instagram</span>
+                </label>
+            </div>
+            
+            <button class="btn" id="upload-btn" disabled>업로드 시작</button>
+        </div>
+        
+        <div class="card">
+            <h2>업로드 목록</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>파일명</th>
+                        <th>제목</th>
+                        <th>YouTube</th>
+                        <th>Instagram</th>
+                    </tr>
+                </thead>
+                <tbody id="video-list">
+                    <tr>
+                        <td colspan="4" class="empty-message">영상이 없습니다</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    
+    <script>
+        const uploadArea = document.getElementById('upload-area');
+        const fileInput = document.getElementById('file-input');
+        const uploadBtn = document.getElementById('upload-btn');
+        let selectedFile = null;
+        
+        uploadArea.addEventListener('click', () => fileInput.click());
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+        uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            if (e.dataTransfer.files.length) {
+                fileInput.files = e.dataTransfer.files;
+                handleFileSelect();
+            }
+        });
+        fileInput.addEventListener('change', handleFileSelect);
+        
+        function handleFileSelect() {
+            if (fileInput.files.length) {
+                selectedFile = fileInput.files[0];
+                uploadArea.innerHTML = `<p>${selectedFile.name}</p>`;
+                uploadBtn.disabled = false;
+            }
         }
         
-        media = MediaFileUpload(filepath, mimetype="video/mp4", resumable=True, chunksize=1024*1024)
-        request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+        uploadBtn.addEventListener('click', async () => {
+            if (!selectedFile) return;
+            
+            const formData = new FormData();
+            formData.append('video', selectedFile);
+            formData.append('title', document.getElementById('title').value || selectedFile.name);
+            formData.append('description', document.getElementById('description').value);
+            formData.append('tags', document.getElementById('tags').value);
+            formData.append('privacy', document.getElementById('privacy').value);
+            
+            if (document.getElementById('platform-youtube').checked) {
+                formData.append('platforms', 'youtube');
+            }
+            if (document.getElementById('platform-instagram').checked) {
+                formData.append('platforms', 'instagram');
+            }
+            
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = '업로드 중...';
+            
+            try {
+                const response = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const result = await response.json();
+                if (result.video_id) {
+                    resetForm();
+                    loadVideos();
+                }
+            } catch (e) {
+                alert('업로드 실패: ' + e.message);
+            }
+            
+            uploadBtn.disabled = false;
+            uploadBtn.textContent = '업로드 시작';
+        });
         
-        response = None
-        while response is None:
-            status, response = request.next_chunk()
-            if status:
-                progress = int(status.progress() * 100)
-                upload_status[video_id]["progress"] = progress
-                upload_status[video_id]["message"] = f"업로드 중... {progress}%"
-        
-        yt_id = response["id"]
-        upload_status[video_id] = {
-            "status": "done",
-            "progress": 100,
-            "message": "완료",
-            "youtube_id": yt_id,
-            "url": f"https://youtu.be/{yt_id}",
-            "shorts_url": f"https://youtube.com/shorts/{yt_id}"
+        function resetForm() {
+            selectedFile = null;
+            fileInput.value = '';
+            uploadArea.innerHTML = '<p>클릭하거나 영상을 드래그하세요 (MP4)</p>';
+            document.getElementById('title').value = '';
+            document.getElementById('description').value = '';
+            document.getElementById('tags').value = '';
         }
         
-        # 데이터 파일 업데이트
-        videos = load_videos()
-        for v in videos:
-            if v["id"] == video_id:
-                v["status"] = "done"
-                v["youtube_id"] = yt_id
-                v["url"] = f"https://youtu.be/{yt_id}"
-                break
-        save_videos(videos)
+        async function loadVideos() {
+            try {
+                const response = await fetch('/api/videos');
+                const videos = await response.json();
+                const tbody = document.getElementById('video-list');
+                
+                if (Object.keys(videos).length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" class="empty-message">영상이 없습니다</td></tr>';
+                    return;
+                }
+                
+                tbody.innerHTML = Object.entries(videos).map(([id, video]) => `
+                    <tr>
+                        <td>${video.filename}</td>
+                        <td>${video.title}</td>
+                        <td>${renderStatus(video.youtube)}</td>
+                        <td>${renderStatus(video.instagram)}</td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                console.error(e);
+            }
+        }
         
-    except Exception as e:
-        upload_status[video_id] = {"status": "error", "message": str(e)}
-
-
-@app.route('/')
-def index():
-    return render_template('index.html')
-
-
-@app.route('/api/videos', methods=['GET'])
-def get_videos():
-    return jsonify(load_videos())
-
-
-@app.route('/api/videos', methods=['POST'])
-def add_video():
-    if 'video' not in request.files:
-        return jsonify({"error": "파일이 없습니다"}), 400
-    
-    file = request.files['video']
-    if file.filename == '':
-        return jsonify({"error": "파일명이 없습니다"}), 400
-    
-    filename = secure_filename(file.filename)
-    # 한글 파일명 지원을 위해 타임스탬프 추가
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_name = f"{timestamp}_{filename}"
-    filepath = os.path.join(app.config['UPLOAD_FOLDER'], save_name)
-    file.save(filepath)
-    
-    video = {
-        "id": timestamp,
-        "filename": filename,
-        "filepath": filepath,
-        "title": request.form.get('title', filename),
-        "description": request.form.get('description', ''),
-        "tags": [t.strip() for t in request.form.get('tags', '').split(',') if t.strip()],
-        "privacy": request.form.get('privacy', 'public'),
-        "status": "ready",
-        "created_at": datetime.now().isoformat()
-    }
-    
-    videos = load_videos()
-    videos.append(video)
-    save_videos(videos)
-    
-    return jsonify(video)
-
-
-@app.route('/api/upload/<video_id>', methods=['POST'])
-def upload_video(video_id):
-    videos = load_videos()
-    video = next((v for v in videos if v["id"] == video_id), None)
-    
-    if not video:
-        return jsonify({"error": "영상을 찾을 수 없습니다"}), 404
-    
-    # 백그라운드에서 업로드
-    thread = threading.Thread(
-        target=do_upload,
-        args=(video_id, video["filepath"], video["title"], video["description"], video["tags"], video["privacy"])
-    )
-    thread.start()
-    
-    return jsonify({"message": "업로드 시작됨"})
-
-
-@app.route('/api/status/<video_id>')
-def get_status(video_id):
-    return jsonify(upload_status.get(video_id, {"status": "unknown"}))
-
-
-@app.route('/api/auth/status')
-def auth_status():
-    has_secret = os.path.exists(CLIENT_SECRET_FILE)
-    has_token = os.path.exists(TOKEN_FILE)
-    return jsonify({
-        "has_client_secret": has_secret,
-        "has_token": has_token,
-        "ready": has_secret and has_token
-    })
-
-
-@app.route('/api/auth/login', methods=['POST'])
-def auth_login():
-    try:
-        youtube = get_youtube_service()
-        if youtube:
-            return jsonify({"success": True, "message": "인증 완료"})
-        else:
-            return jsonify({"success": False, "message": "client_secret.json이 필요합니다"})
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)})
-
-
-if __name__ == '__main__':
-    print("=" * 50)
-    print("YouTube Shorts Uploader")
-    print("브라우저에서 http://localhost:5000 접속")
-    print("=" * 50)
-    app.run(debug=True, port=5000)
+        function renderStatus(status) {
+            if (!status) return '-';
+            if (status.status === 'uploading') {
+                return `<div class="progress-bar"><div class="progress-fill" style="width: ${status.progress || 0}%"></div></div>`;
+            }
+            if (status.status === 'completed') {
+                return `<a href="${status.url}" target="_blank">완료</a>`;
+            }
+            if (status.status === 'error') {
+                return `<span class="status-badge status-error" title="${status.message}">오류</span>`;
+            }
+            return status.status;
+        }
+        
+        async function checkAuth() {
+            try {
+                const response = await fetch('/api/auth/status');
+                const status = await response.json();
+                document.getElementById('youtube-dot').classList.toggle('connected', status.youtube);
+                document.getElementById('instagram-dot').classList.toggle('connected', status.instagram);
+            } catch (e) {
+                console.error(e);
+            }
+        }
+        
+        checkAuth();
+        loadVideos();
+        setInterval(loadVideos, 3000);
+    </script>
+</body>
+</html>
