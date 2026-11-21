@@ -2,6 +2,7 @@ from flask import Flask, render_template, request, jsonify
 import os
 import json
 import requests
+from datetime import datetime
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -41,7 +42,7 @@ def get_youtube_credentials():
             token.write(creds.to_json())
     return creds
 
-def upload_to_youtube(video_id, filepath, title, description, tags, privacy):
+def upload_to_youtube(video_id, filepath, title, description, tags, privacy, schedule_time=None):
     try:
         creds = get_youtube_credentials()
         if not creds:
@@ -50,6 +51,15 @@ def upload_to_youtube(video_id, filepath, title, description, tags, privacy):
         
         youtube = build('youtube', 'v3', credentials=creds)
         
+        status_body = {
+            'privacyStatus': 'private' if schedule_time else privacy,
+            'selfDeclaredMadeForKids': False
+        }
+        
+        if schedule_time:
+            status_body['publishAt'] = schedule_time
+            status_body['privacyStatus'] = 'private'
+        
         body = {
             'snippet': {
                 'title': title,
@@ -57,10 +67,7 @@ def upload_to_youtube(video_id, filepath, title, description, tags, privacy):
                 'tags': tags.split(',') if tags else [],
                 'categoryId': '22'
             },
-            'status': {
-                'privacyStatus': privacy,
-                'selfDeclaredMadeForKids': False
-            }
+            'status': status_body
         }
         
         media = MediaFileUpload(filepath, chunksize=1024*1024, resumable=True)
@@ -73,15 +80,20 @@ def upload_to_youtube(video_id, filepath, title, description, tags, privacy):
                 progress = int(status.progress() * 100)
                 upload_status[video_id]['youtube']['progress'] = progress
         
-        upload_status[video_id]['youtube'] = {
+        result = {
             'status': 'completed',
             'video_id': response['id'],
             'url': f"https://youtube.com/shorts/{response['id']}"
         }
+        if schedule_time:
+            result['scheduled'] = schedule_time
+            result['status'] = 'scheduled'
+        
+        upload_status[video_id]['youtube'] = result
     except Exception as e:
         upload_status[video_id]['youtube'] = {'status': 'error', 'message': str(e)}
 
-def upload_to_instagram(video_id, filepath, caption):
+def upload_to_instagram(video_id, filepath, caption, schedule_time=None):
     try:
         config = load_instagram_config()
         if not config:
@@ -93,17 +105,6 @@ def upload_to_instagram(video_id, filepath, caption):
         
         upload_status[video_id]['instagram']['progress'] = 10
         
-        # Step 1: Create container
-        container_url = f"https://graph.facebook.com/v18.0/{ig_account_id}/media"
-        container_params = {
-            'media_type': 'REELS',
-            'video_url': 'FILE_UPLOAD',
-            'caption': caption,
-            'access_token': access_token
-        }
-        
-        # For local file upload, we need to use resumable upload
-        # First, get upload URL
         init_url = f"https://graph.facebook.com/v18.0/{ig_account_id}/media"
         init_params = {
             'media_type': 'REELS',
@@ -111,6 +112,9 @@ def upload_to_instagram(video_id, filepath, caption):
             'caption': caption,
             'access_token': access_token
         }
+        
+        if schedule_time:
+            init_params['scheduled_publish_time'] = schedule_time
         
         init_response = requests.post(init_url, data=init_params)
         init_data = init_response.json()
@@ -124,7 +128,6 @@ def upload_to_instagram(video_id, filepath, caption):
         
         upload_status[video_id]['instagram']['progress'] = 30
         
-        # Step 2: Upload video
         file_size = os.path.getsize(filepath)
         with open(filepath, 'rb') as video_file:
             headers = {
@@ -136,7 +139,6 @@ def upload_to_instagram(video_id, filepath, caption):
         
         upload_status[video_id]['instagram']['progress'] = 70
         
-        # Step 3: Publish
         publish_url = f"https://graph.facebook.com/v18.0/{ig_account_id}/media_publish"
         publish_params = {
             'creation_id': container_id,
@@ -147,11 +149,14 @@ def upload_to_instagram(video_id, filepath, caption):
         publish_data = publish_response.json()
         
         if 'id' in publish_data:
-            upload_status[video_id]['instagram'] = {
-                'status': 'completed',
+            result = {
+                'status': 'scheduled' if schedule_time else 'completed',
                 'media_id': publish_data['id'],
                 'url': f"https://instagram.com/reel/{publish_data['id']}"
             }
+            if schedule_time:
+                result['scheduled'] = schedule_time
+            upload_status[video_id]['instagram'] = result
         else:
             upload_status[video_id]['instagram'] = {'status': 'error', 'message': publish_data.get('error', {}).get('message', '게시 실패')}
             
@@ -186,9 +191,15 @@ def upload_video():
     tags = request.form.get('tags', '')
     privacy = request.form.get('privacy', 'public')
     platforms = request.form.getlist('platforms')
+    schedule_date = request.form.get('schedule_date', '')
+    schedule_time = request.form.get('schedule_time', '')
     
     if not platforms:
         platforms = ['youtube']
+    
+    schedule_datetime = None
+    if schedule_date and schedule_time:
+        schedule_datetime = f"{schedule_date}T{schedule_time}:00+09:00"
     
     filename = file.filename
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
@@ -198,18 +209,23 @@ def upload_video():
     upload_status[video_id] = {
         'filename': filename,
         'title': title,
-        'platforms': platforms
+        'platforms': platforms,
+        'scheduled': schedule_datetime
     }
     
     if 'youtube' in platforms:
         upload_status[video_id]['youtube'] = {'status': 'uploading', 'progress': 0}
-        thread = threading.Thread(target=upload_to_youtube, args=(video_id, filepath, title, description, tags, privacy))
+        thread = threading.Thread(target=upload_to_youtube, args=(video_id, filepath, title, description, tags, privacy, schedule_datetime))
         thread.start()
     
     if 'instagram' in platforms:
         upload_status[video_id]['instagram'] = {'status': 'uploading', 'progress': 0}
         caption = f"{title}\n\n{description}"
-        thread = threading.Thread(target=upload_to_instagram, args=(video_id, filepath, caption))
+        ig_schedule = None
+        if schedule_datetime:
+            dt = datetime.fromisoformat(schedule_datetime.replace('+09:00', '+09:00'))
+            ig_schedule = int(dt.timestamp())
+        thread = threading.Thread(target=upload_to_instagram, args=(video_id, filepath, caption, ig_schedule))
         thread.start()
     
     return jsonify({'video_id': video_id, 'status': 'started'})
