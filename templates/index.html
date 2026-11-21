@@ -66,7 +66,7 @@
             color: #888;
             margin-bottom: 5px;
         }
-        input[type="text"], textarea, select {
+        input[type="text"], input[type="date"], input[type="time"], textarea, select {
             width: 100%;
             background: #2a2a2a;
             border: 1px solid #333;
@@ -91,6 +91,24 @@
             cursor: pointer;
         }
         .platform-check input { width: 18px; height: 18px; }
+        .schedule-section {
+            margin-top: 15px;
+            padding: 15px;
+            background: #252525;
+            border-radius: 8px;
+        }
+        .schedule-toggle {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        .schedule-toggle input { width: 18px; height: 18px; }
+        .schedule-inputs {
+            display: none;
+            gap: 15px;
+        }
+        .schedule-inputs.active { display: flex; }
         .btn {
             background: #4CAF50;
             color: #fff;
@@ -120,6 +138,7 @@
         }
         .status-uploading { background: #ff9800; }
         .status-completed { background: #4CAF50; }
+        .status-scheduled { background: #2196F3; }
         .status-error { background: #f44336; }
         .progress-bar {
             width: 100px;
@@ -202,6 +221,23 @@
                 </label>
             </div>
             
+            <div class="schedule-section">
+                <label class="schedule-toggle">
+                    <input type="checkbox" id="schedule-toggle">
+                    <span>예약 업로드</span>
+                </label>
+                <div class="schedule-inputs" id="schedule-inputs">
+                    <div class="form-group">
+                        <label>날짜</label>
+                        <input type="date" id="schedule-date">
+                    </div>
+                    <div class="form-group">
+                        <label>시간</label>
+                        <input type="time" id="schedule-time">
+                    </div>
+                </div>
+            </div>
+            
             <button class="btn" id="upload-btn" disabled>업로드 시작</button>
         </div>
         
@@ -229,7 +265,13 @@
         const uploadArea = document.getElementById('upload-area');
         const fileInput = document.getElementById('file-input');
         const uploadBtn = document.getElementById('upload-btn');
+        const scheduleToggle = document.getElementById('schedule-toggle');
+        const scheduleInputs = document.getElementById('schedule-inputs');
         let selectedFile = null;
+        
+        scheduleToggle.addEventListener('change', () => {
+            scheduleInputs.classList.toggle('active', scheduleToggle.checked);
+        });
         
         uploadArea.addEventListener('click', () => fileInput.click());
         uploadArea.addEventListener('dragover', (e) => {
@@ -272,6 +314,11 @@
                 formData.append('platforms', 'instagram');
             }
             
+            if (scheduleToggle.checked) {
+                formData.append('schedule_date', document.getElementById('schedule-date').value);
+                formData.append('schedule_time', document.getElementById('schedule-time').value);
+            }
+            
             uploadBtn.disabled = true;
             uploadBtn.textContent = '업로드 중...';
             
@@ -300,6 +347,8 @@
             document.getElementById('title').value = '';
             document.getElementById('description').value = '';
             document.getElementById('tags').value = '';
+            scheduleToggle.checked = false;
+            scheduleInputs.classList.remove('active');
         }
         
         async function loadVideos() {
@@ -333,6 +382,9 @@
             }
             if (status.status === 'completed') {
                 return `<a href="${status.url}" target="_blank">완료</a>`;
+            }
+            if (status.status === 'scheduled') {
+                return `<span class="status-badge status-scheduled">예약됨</span>`;
             }
             if (status.status === 'error') {
                 return `<span class="status-badge status-error" title="${status.message}">오류</span>`;
